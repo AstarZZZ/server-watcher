@@ -271,7 +271,7 @@ function StoragePieChart({
     ? Math.max(0, filesystem.usedBytes - scannedBytes)
     : 0;
   const freeBytes = filesystem ? Math.max(0, filesystem.availableBytes) : 0;
-  const segments = [
+  const baseSegments = [
     ...userSegments,
     ...(untrackedBytes > 0
       ? [{ label: "系统/未扫描", value: untrackedBytes, color: "#64748b" }]
@@ -280,10 +280,15 @@ function StoragePieChart({
       ? [{ label: "剩余空间", value: freeBytes, color: "#94a3b8" }]
       : [])
   ].filter((segment) => segment.value > 0);
-  const totalBytes =
-    filesystem?.totalBytes && filesystem.totalBytes > 0
-      ? filesystem.totalBytes
-      : segments.reduce((sum, segment) => sum + segment.value, 0);
+  const baseBytes = baseSegments.reduce((sum, segment) => sum + segment.value, 0);
+  const totalBytes = Math.max(filesystem?.totalBytes ?? 0, baseBytes);
+  const reservedBytes = Math.max(0, totalBytes - baseBytes);
+  const segments = [
+    ...baseSegments,
+    ...(reservedBytes > 0
+      ? [{ label: "保留空间", value: reservedBytes, color: "#cbd5e1" }]
+      : [])
+  ];
   const gradientSegments = segments.map((segment) => ({
     color: segment.color,
     percent: totalBytes > 0 ? (segment.value / totalBytes) * 100 : 0
