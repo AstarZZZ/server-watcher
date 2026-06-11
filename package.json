@@ -1,0 +1,16 @@
+{
+  "name": "server-watcher",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Low-footprint GPU/server watcher with SSH login, web terminal, process controls, and autostart visibility.",
+  "scripts": {
+    "install:all": "npm install --prefix backend && npm install --prefix frontend",
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:frontend": "npm --prefix frontend run dev -- --host 0.0.0.0",
+    "build": "npm --prefix frontend run build && npm --prefix backend run build",
+    "start": "node backend/dist/server.js"
+  },
+  "engines": {
+    "node": ">=16.20.0"
+  }
+}
