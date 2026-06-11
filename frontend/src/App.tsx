@@ -1,7 +1,7 @@
 import {
   Activity,
   Boxes,
-  Cable,
+  Clock3,
   Cpu,
   Database,
   Filter,
@@ -11,7 +11,7 @@ import {
   ListChecks,
   LogOut,
   MemoryStick,
-  PlayCircle,
+  Moon,
   Power,
   RefreshCw,
   Search,
@@ -19,6 +19,7 @@ import {
   ShieldAlert,
   Signal,
   Square,
+  Sun,
   TerminalSquare,
   Thermometer,
   Users
@@ -58,6 +59,8 @@ type Page =
   | "terminal"
   | "autostart";
 
+type ThemeMode = "dark" | "light";
+
 interface PendingAction {
   title: string;
   description: string;
@@ -81,6 +84,25 @@ const navItems: Array<{
   { id: "terminal", label: "终端", icon: TerminalSquare },
   { id: "autostart", label: "自启动", icon: Power }
 ];
+
+const refreshIntervalOptions = [2000, 5000, 10000, 30000, 60000] as const;
+const defaultRefreshIntervalMs = 2000;
+
+function normalizeRefreshInterval(value: number): number {
+  if (!Number.isFinite(value)) return defaultRefreshIntervalMs;
+  return Math.min(60000, Math.max(2000, Math.round(value / 1000) * 1000));
+}
+
+function getStoredRefreshInterval(): number {
+  const stored = window.localStorage.getItem("server-watcher.refreshIntervalMs");
+  return normalizeRefreshInterval(Number(stored ?? defaultRefreshIntervalMs));
+}
+
+function getStoredTheme(): ThemeMode {
+  const stored = window.localStorage.getItem("server-watcher.theme");
+  if (stored === "light" || stored === "dark") return stored;
+  return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+}
 
 function wsUrl(path: string): string {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -167,7 +189,7 @@ function LoginScreen({
             value={username}
             onChange={(event) => setUsername(event.target.value)}
             autoComplete="username"
-            placeholder="zhaojunzhe"
+            placeholder="SSH 用户名"
           />
         </label>
         <label>
@@ -492,12 +514,26 @@ export default function App() {
   const [autostart, setAutostart] = useState<AutostartItem[]>([]);
   const [toast, setToast] = useState("");
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
+  const [refreshIntervalMs, setRefreshIntervalMs] = useState(getStoredRefreshInterval);
+  const [theme, setTheme] = useState<ThemeMode>(getStoredTheme);
   const [filters, setFilters] = useState({
     user: "",
     process: "",
     gpu: "",
     cpu: ""
   });
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    window.localStorage.setItem("server-watcher.theme", theme);
+  }, [theme]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      "server-watcher.refreshIntervalMs",
+      String(refreshIntervalMs)
+    );
+  }, [refreshIntervalMs]);
 
   useEffect(() => {
     fetchMe()
@@ -512,7 +548,10 @@ export default function App() {
     let closed = false;
 
     getSnapshot().then(setSnapshot).catch((error) => setToast(error.message));
-    socket = new WebSocket(wsUrl("/ws/live"));
+    socket = new WebSocket(wsUrl(`/ws/live?intervalMs=${refreshIntervalMs}`));
+    socket.onopen = () => {
+      socket?.send(JSON.stringify({ type: "interval", intervalMs: refreshIntervalMs }));
+    };
     socket.onmessage = (message) => {
       const payload = JSON.parse(message.data) as {
         type: string;
@@ -530,7 +569,7 @@ export default function App() {
       closed = true;
       socket?.close();
     };
-  }, [user]);
+  }, [refreshIntervalMs, user]);
 
   useEffect(() => {
     if (!user) return;
@@ -570,6 +609,7 @@ export default function App() {
   const gpuUsed = snapshot?.gpus.reduce((sum, gpu) => sum + gpu.memoryUsedBytes, 0) ?? 0;
   const rootFs = snapshot?.filesystems.find((item) => item.mount === "/") ?? snapshot?.filesystems[0];
   const topLogs = logs.length ? logs.slice(0, 7) : [];
+  const refreshLabel = `${refreshIntervalMs / 1000} 秒`;
 
   function doSignal(process: ProcessInfo, signal: "TERM" | "KILL") {
     setPendingAction({
@@ -671,10 +711,34 @@ export default function App() {
             </span>
           </div>
           <div className="topbar-actions">
+            <label className="interval-control" title="实时刷新间隔">
+              <Clock3 size={15} />
+              <span>刷新</span>
+              <select
+                aria-label="实时刷新间隔"
+                value={refreshIntervalMs}
+                onChange={(event) =>
+                  setRefreshIntervalMs(normalizeRefreshInterval(Number(event.target.value)))
+                }
+              >
+                {refreshIntervalOptions.map((interval) => (
+                  <option value={interval} key={interval}>
+                    {interval / 1000} 秒
+                  </option>
+                ))}
+              </select>
+            </label>
             <span className={snapshot?.activeClients ? "status-chip live" : "status-chip"}>
               <Signal size={14} />
               {snapshot?.activeClients ?? 0} 在线
             </span>
+            <button
+              className="icon-button"
+              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+              title={theme === "dark" ? "切换浅色模式" : "切换深色模式"}
+            >
+              {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+            </button>
             <button
               className="secondary-button"
               onClick={() => refreshSnapshot().then(setSnapshot).catch((error) => setToast(error.message))}
@@ -735,7 +799,7 @@ export default function App() {
                 <div className="section-head">
                   <div>
                     <h2>GPU 实时状态</h2>
-                    <p>有人访问时每 2 秒刷新；无人访问时降级到每小时快照。</p>
+                    <p>有人访问时按顶部间隔刷新（当前 {refreshLabel}）；无人访问时降级到每小时快照。</p>
                   </div>
                 </div>
                 <div className="gpu-grid">
@@ -859,7 +923,7 @@ export default function App() {
           </section>
         )}
 
-        {page === "terminal" && <TerminalPane username={user.username} />}
+        {page === "terminal" && <TerminalPane username={user.username} theme={theme} />}
 
         {page === "autostart" && (
           <AutostartPage

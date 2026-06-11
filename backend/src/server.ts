@@ -29,8 +29,27 @@ interface JsonBody {
 }
 
 const liveClients = new Set<WebSocket>();
+const liveClientIntervals = new Map<WebSocket, { intervalMs: number; lastSentAt: number }>();
 const terminalClients = new Set<WebSocket>();
-const collector = new Collector(() => liveClients.size + terminalClients.size);
+const defaultLiveIntervalMs = 2000;
+
+function normalizeLiveInterval(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return defaultLiveIntervalMs;
+  return Math.min(60_000, Math.max(2000, Math.round(parsed / 1000) * 1000));
+}
+
+const collector = new Collector(
+  () => liveClients.size + terminalClients.size,
+  () => {
+    if (liveClientIntervals.size > 0) {
+      return Math.min(
+        ...Array.from(liveClientIntervals.values()).map((item) => item.intervalMs)
+      );
+    }
+    return terminalClients.size > 0 ? defaultLiveIntervalMs : null;
+  }
+);
 
 function sendJson(
   res: ServerResponse,
@@ -309,9 +328,22 @@ function sendWs(ws: WebSocket, payload: unknown): void {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
 }
 
+function sendSnapshotToClient(
+  client: WebSocket,
+  snapshot: SystemSnapshot,
+  force = false
+): void {
+  const settings = liveClientIntervals.get(client);
+  if (!settings) return;
+  const now = Date.now();
+  if (!force && now - settings.lastSentAt < settings.intervalMs) return;
+  settings.lastSentAt = now;
+  sendWs(client, { type: "snapshot", snapshot });
+}
+
 function broadcastSnapshot(snapshot: SystemSnapshot): void {
   for (const client of liveClients) {
-    sendWs(client, { type: "snapshot", snapshot });
+    sendSnapshotToClient(client, snapshot);
   }
 }
 
@@ -323,12 +355,32 @@ liveWss.on("connection", (ws, req) => {
     ws.close(1008, "unauthorized");
     return;
   }
+  const url = getUrl(req);
+  const intervalMs = normalizeLiveInterval(url.searchParams.get("intervalMs"));
   liveClients.add(ws);
+  liveClientIntervals.set(ws, { intervalMs, lastSentAt: 0 });
   void recordEvent("client.open", "前端实时连接打开", session.username);
   const snapshot = collector.getSnapshot();
-  if (snapshot) sendWs(ws, { type: "snapshot", snapshot });
+  if (snapshot) sendSnapshotToClient(ws, snapshot, true);
+  ws.on("message", (raw) => {
+    try {
+      const message = JSON.parse(raw.toString()) as {
+        type?: string;
+        intervalMs?: number;
+      };
+      if (message.type === "interval") {
+        const settings = liveClientIntervals.get(ws);
+        if (settings) {
+          settings.intervalMs = normalizeLiveInterval(message.intervalMs);
+        }
+      }
+    } catch {
+      // Ignore malformed live-control messages.
+    }
+  });
   ws.on("close", () => {
     liveClients.delete(ws);
+    liveClientIntervals.delete(ws);
     void recordEvent("client.close", "前端实时连接关闭", session.username);
   });
 });
@@ -357,7 +409,16 @@ terminalWss.on("connection", (ws, req) => {
 
       if (message.type === "auth") {
         if (sshClient) return;
-        sshClient = await connectSsh(session.username, String(message.password ?? ""));
+        try {
+          sshClient = await connectSsh(session.username, String(message.password ?? ""));
+        } catch (error) {
+          sendWs(ws, {
+            type: "error",
+            message: error instanceof Error ? error.message : String(error)
+          });
+          ws.close(1008, "ssh auth failed");
+          return;
+        }
         sshClient.on("close", () => {
           sendWs(ws, { type: "status", message: "SSH 连接已关闭" });
           ws.close();
@@ -372,9 +433,11 @@ terminalWss.on("connection", (ws, req) => {
           (error, stream) => {
             if (error) {
               sendWs(ws, { type: "error", message: error.message });
+              ws.close(1011, "shell failed");
               return;
             }
             shell = stream;
+            sendWs(ws, { type: "status", message: "SSH 连接成功" });
             stream.on("data", (chunk: Buffer) => {
               sendWs(ws, { type: "data", data: chunk.toString("utf8") });
             });

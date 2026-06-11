@@ -493,7 +493,10 @@ export class Collector extends EventEmitter {
   private lastCollectionAt = 0;
   private lastStorageScanDay = "";
 
-  constructor(private readonly getActiveClients: () => number) {
+  constructor(
+    private readonly getActiveClients: () => number,
+    private readonly getActiveIntervalMs: () => number | null = () => 2000
+  ) {
     super();
   }
 
@@ -505,11 +508,19 @@ export class Collector extends EventEmitter {
     if (this.timer) return;
     void this.collect("startup");
     this.timer = setInterval(() => {
+      const now = Date.now();
       const active = this.getActiveClients() > 0;
-      const idleDue = Date.now() - this.lastCollectionAt > 60 * 60 * 1000;
-      if (active || idleDue) void this.collect(active ? "active" : "idle");
+      const idleDue = now - this.lastCollectionAt > 60 * 60 * 1000;
+      const activeInterval = this.getActiveIntervalMs();
+      const activeDue =
+        active &&
+        activeInterval !== null &&
+        now - this.lastCollectionAt >= Math.max(1000, activeInterval);
+      if (activeDue || (!active && idleDue)) {
+        void this.collect(activeDue ? "active" : "idle");
+      }
       void this.maybeScanStorage();
-    }, 2000);
+    }, 1000);
   }
 
   stop(): void {
