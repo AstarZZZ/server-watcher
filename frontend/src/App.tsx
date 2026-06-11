@@ -60,6 +60,8 @@ type Page =
   | "autostart";
 
 type ThemeMode = "dark" | "light";
+type StorageItem = SystemSnapshot["storage"][number];
+type FilesystemItem = SystemSnapshot["filesystems"][number];
 
 interface PendingAction {
   title: string;
@@ -85,12 +87,20 @@ const navItems: Array<{
   { id: "autostart", label: "自启动", icon: Power }
 ];
 
-const refreshIntervalOptions = [2000, 5000, 10000, 30000, 60000] as const;
+const refreshIntervalOptions = [1000, 2000, 5000, 10000, 30000, 60000] as const;
 const defaultRefreshIntervalMs = 2000;
+const storageChartColors = [
+  "#0891b2",
+  "#059669",
+  "#d97706",
+  "#7c3aed",
+  "#2563eb",
+  "#be123c"
+];
 
 function normalizeRefreshInterval(value: number): number {
   if (!Number.isFinite(value)) return defaultRefreshIntervalMs;
-  return Math.min(60000, Math.max(2000, Math.round(value / 1000) * 1000));
+  return Math.min(60000, Math.max(1000, Math.round(value / 1000) * 1000));
 }
 
 function getStoredRefreshInterval(): number {
@@ -107,6 +117,46 @@ function getStoredTheme(): ThemeMode {
 function wsUrl(path: string): string {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   return `${protocol}//${window.location.host}${path}`;
+}
+
+function mountContainsPath(mount: string, targetPath: string): boolean {
+  if (mount === "/") return targetPath.startsWith("/");
+  const cleanMount = mount.replace(/\/+$/, "");
+  return targetPath === cleanMount || targetPath.startsWith(`${cleanMount}/`);
+}
+
+function findStorageFilesystem(snapshot: SystemSnapshot | null): FilesystemItem | undefined {
+  const filesystems = snapshot?.filesystems ?? [];
+  const samplePath = snapshot?.storage.find((item) => item.path)?.path ?? "/home";
+  return (
+    filesystems
+      .filter((filesystem) => mountContainsPath(filesystem.mount, samplePath))
+      .sort((left, right) => right.mount.length - left.mount.length)[0] ??
+    filesystems.find((item) => item.mount === "/") ??
+    filesystems[0]
+  );
+}
+
+function successfulStorageItems(storage: StorageItem[]): StorageItem[] {
+  return storage
+    .filter((item) => item.status === "ok" && item.bytes > 0)
+    .sort((left, right) => right.bytes - left.bytes);
+}
+
+function colorForIndex(index: number): string {
+  return storageChartColors[index % storageChartColors.length];
+}
+
+function buildConicGradient(segments: Array<{ color: string; percent: number }>): string {
+  if (segments.length === 0) return "conic-gradient(var(--progress-track) 0% 100%)";
+  let start = 0;
+  const stops = segments.map((segment) => {
+    const end = start + segment.percent;
+    const stop = `${segment.color} ${start.toFixed(2)}% ${end.toFixed(2)}%`;
+    start = end;
+    return stop;
+  });
+  return `conic-gradient(${stops.join(", ")})`;
 }
 
 function ProgressBar({
@@ -147,6 +197,134 @@ function StatCard({
         <strong>{value}</strong>
         <small>{sub}</small>
       </div>
+    </article>
+  );
+}
+
+function StorageBarChart({ storage }: { storage: StorageItem[] }) {
+  const rows = successfulStorageItems(storage).slice(0, 10);
+  const maxBytes = rows[0]?.bytes ?? 0;
+  const totalBytes = rows.reduce((sum, item) => sum + item.bytes, 0);
+
+  return (
+    <article className="chart-panel storage-bar-panel">
+      <div className="chart-head">
+        <div>
+          <h3>用户空间排行</h3>
+          <p>按最近一次扫描的目录占用排序。</p>
+        </div>
+        <strong>{bytes(totalBytes)}</strong>
+      </div>
+      {rows.length === 0 ? (
+        <div className="empty-panel compact">还没有可绘制的存储扫描结果</div>
+      ) : (
+        <div className="storage-bars">
+          {rows.map((item, index) => {
+            const width = maxBytes > 0 ? Math.max(2, (item.bytes / maxBytes) * 100) : 0;
+            return (
+              <div className="storage-bar-row" key={`${item.user}-${item.path}`}>
+                <div className="storage-bar-meta">
+                  <strong>{item.user}</strong>
+                  <span>{bytes(item.bytes)}</span>
+                </div>
+                <div className="storage-bar-track" title={`${item.path} · ${bytes(item.bytes)}`}>
+                  <span
+                    style={{
+                      width: `${width}%`,
+                      background: colorForIndex(index)
+                    }}
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </article>
+  );
+}
+
+function StoragePieChart({
+  storage,
+  filesystem
+}: {
+  storage: StorageItem[];
+  filesystem: FilesystemItem | undefined;
+}) {
+  const sortedStorage = successfulStorageItems(storage);
+  const scannedBytes = sortedStorage.reduce((sum, item) => sum + item.bytes, 0);
+  const userSegments = sortedStorage.slice(0, 5).map((item, index) => ({
+    label: item.user,
+    value: item.bytes,
+    color: colorForIndex(index)
+  }));
+  const otherUserBytes = sortedStorage.slice(5).reduce((sum, item) => sum + item.bytes, 0);
+  if (otherUserBytes > 0) {
+    userSegments.push({
+      label: "其他用户",
+      value: otherUserBytes,
+      color: colorForIndex(5)
+    });
+  }
+
+  const untrackedBytes = filesystem
+    ? Math.max(0, filesystem.usedBytes - scannedBytes)
+    : 0;
+  const freeBytes = filesystem ? Math.max(0, filesystem.availableBytes) : 0;
+  const segments = [
+    ...userSegments,
+    ...(untrackedBytes > 0
+      ? [{ label: "系统/未扫描", value: untrackedBytes, color: "#64748b" }]
+      : []),
+    ...(freeBytes > 0
+      ? [{ label: "剩余空间", value: freeBytes, color: "#94a3b8" }]
+      : [])
+  ].filter((segment) => segment.value > 0);
+  const totalBytes =
+    filesystem?.totalBytes && filesystem.totalBytes > 0
+      ? filesystem.totalBytes
+      : segments.reduce((sum, segment) => sum + segment.value, 0);
+  const gradientSegments = segments.map((segment) => ({
+    color: segment.color,
+    percent: totalBytes > 0 ? (segment.value / totalBytes) * 100 : 0
+  }));
+
+  return (
+    <article className="chart-panel storage-pie-panel">
+      <div className="chart-head">
+        <div>
+          <h3>空间构成</h3>
+          <p>{filesystem ? `${filesystem.mount} · 含剩余空间` : "扫描目录 · 含剩余空间"}</p>
+        </div>
+        <strong>{filesystem ? percent(filesystem.usedPercent) : "--"}</strong>
+      </div>
+      {segments.length === 0 || totalBytes <= 0 ? (
+        <div className="empty-panel compact">还没有可绘制的磁盘空间数据</div>
+      ) : (
+        <div className="donut-layout">
+          <div
+            className="donut-chart"
+            style={{ background: buildConicGradient(gradientSegments) }}
+            role="img"
+            aria-label="用户存储空间构成饼图"
+          >
+            <div className="donut-hole">
+              <span>总空间</span>
+              <strong>{bytes(totalBytes)}</strong>
+            </div>
+          </div>
+          <div className="pie-legend">
+            {segments.map((segment) => (
+              <div className="pie-legend-row" key={segment.label}>
+                <span className="legend-dot" style={{ background: segment.color }} />
+                <strong>{segment.label}</strong>
+                <span>{bytes(segment.value)}</span>
+                <em>{percent(totalBytes > 0 ? (segment.value / totalBytes) * 100 : null)}</em>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </article>
   );
 }
@@ -608,6 +786,7 @@ export default function App() {
   const gpuTotal = snapshot?.gpus.reduce((sum, gpu) => sum + gpu.memoryTotalBytes, 0) ?? 0;
   const gpuUsed = snapshot?.gpus.reduce((sum, gpu) => sum + gpu.memoryUsedBytes, 0) ?? 0;
   const rootFs = snapshot?.filesystems.find((item) => item.mount === "/") ?? snapshot?.filesystems[0];
+  const storageFs = findStorageFilesystem(snapshot);
   const topLogs = logs.length ? logs.slice(0, 7) : [];
   const refreshLabel = `${refreshIntervalMs / 1000} 秒`;
 
@@ -864,6 +1043,10 @@ export default function App() {
                 <HardDrive size={16} />
                 手动扫描
               </button>
+            </div>
+            <div className="storage-visual-grid">
+              <StorageBarChart storage={snapshot?.storage ?? []} />
+              <StoragePieChart storage={snapshot?.storage ?? []} filesystem={storageFs} />
             </div>
             <div className="table-frame">
               <table>

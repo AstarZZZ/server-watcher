@@ -36,7 +36,7 @@ const defaultLiveIntervalMs = 2000;
 function normalizeLiveInterval(value: unknown): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return defaultLiveIntervalMs;
-  return Math.min(60_000, Math.max(2000, Math.round(parsed / 1000) * 1000));
+  return Math.min(60_000, Math.max(1000, Math.round(parsed / 1000) * 1000));
 }
 
 const collector = new Collector(
