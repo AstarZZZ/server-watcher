@@ -90,6 +90,72 @@ async function readMemory(): Promise<MemoryInfo> {
   };
 }
 
+async function readPasswdUsers(): Promise<Map<number, string>> {
+  const users = new Map<number, string>();
+  for (const file of ["/host/etc/passwd", "/etc/passwd"]) {
+    const text = await readText(file);
+    if (!text) continue;
+    for (const line of text.split("\n")) {
+      if (!line || line.startsWith("#")) continue;
+      const parts = line.split(":");
+      const uid = Number(parts[2]);
+      if (parts[0] && Number.isFinite(uid) && !users.has(uid)) {
+        users.set(uid, parts[0]);
+      }
+    }
+  }
+  return users;
+}
+
+function parseProcStat(
+  stat: string,
+  uptimeSeconds: number
+): { name: string; cpuPercent: number | null } | null {
+  const endOfName = stat.lastIndexOf(")");
+  const startOfName = stat.indexOf("(");
+  if (startOfName === -1 || endOfName === -1 || endOfName <= startOfName) {
+    return null;
+  }
+  const name = stat.slice(startOfName + 1, endOfName);
+  const fields = stat.slice(endOfName + 2).trim().split(/\s+/);
+  const userTicks = Number(fields[11]);
+  const systemTicks = Number(fields[12]);
+  const startTicks = Number(fields[19]);
+  const clockTicks = Number(process.env.CLK_TCK || 100);
+  if (
+    !Number.isFinite(userTicks) ||
+    !Number.isFinite(systemTicks) ||
+    !Number.isFinite(startTicks) ||
+    !Number.isFinite(clockTicks) ||
+    clockTicks <= 0
+  ) {
+    return { name, cpuPercent: null };
+  }
+
+  const ageSeconds = Math.max(1, uptimeSeconds - startTicks / clockTicks);
+  const cpuSeconds = (userTicks + systemTicks) / clockTicks;
+  return { name, cpuPercent: clampPercent((cpuSeconds / ageSeconds) * 100) };
+}
+
+function parseProcStatus(
+  status: string,
+  totalMemoryBytes: number,
+  users: Map<number, string>
+): { user: string; rssBytes: number; memoryPercent: number | null } {
+  const uidMatch = status.match(/^Uid:\s+(\d+)/m);
+  const rssMatch = status.match(/^VmRSS:\s+(\d+)\s+kB/im);
+  const uid = uidMatch ? Number(uidMatch[1]) : NaN;
+  const rssBytes = toBytesFromKb(rssMatch ? Number(rssMatch[1]) : null);
+  return {
+    user: users.get(uid) ?? (Number.isFinite(uid) ? String(uid) : "unknown"),
+    rssBytes,
+    memoryPercent:
+      totalMemoryBytes > 0
+        ? clampPercent((rssBytes / totalMemoryBytes) * 100)
+        : null
+  };
+}
+
 async function readFilesystems(): Promise<FilesystemInfo[]> {
   const result = await tryCommand("df", ["-kP"], 5000);
   if (!result) return [];
@@ -131,7 +197,7 @@ async function readProcesses(): Promise<ProcessInfo[]> {
     }
   }
 
-  if (!output) return [];
+  if (!output) return readProcessesFromProc();
   const processes: ProcessInfo[] = [];
   for (const line of output.split("\n")) {
     const match = line
@@ -151,6 +217,58 @@ async function readProcesses(): Promise<ProcessInfo[]> {
     });
   }
   return processes;
+}
+
+async function readProcessesFromProc(): Promise<ProcessInfo[]> {
+  const [entries, uptimeText, memory, users] = await Promise.all([
+    fs.readdir("/proc", { withFileTypes: true }).catch(() => []),
+    readText("/proc/uptime"),
+    readMemory(),
+    readPasswdUsers()
+  ]);
+  const uptimeSeconds = parseNumber(uptimeText?.split(/\s+/)[0]) ?? 0;
+  const processes: ProcessInfo[] = [];
+
+  await Promise.all(
+    entries
+      .filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name))
+      .map(async (entry) => {
+        const pid = Number(entry.name);
+        const base = path.join("/proc", entry.name);
+        const [stat, status, cmdline] = await Promise.all([
+          readText(path.join(base, "stat")),
+          readText(path.join(base, "status")),
+          readText(path.join(base, "cmdline"))
+        ]);
+        if (!stat || !status) return;
+
+        const parsedStat = parseProcStat(stat, uptimeSeconds);
+        if (!parsedStat) return;
+        const parsedStatus = parseProcStatus(
+          status,
+          memory.totalBytes,
+          users
+        );
+        const command = (cmdline ?? "")
+          .replace(/\0/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+
+        processes.push({
+          pid,
+          user: parsedStatus.user,
+          cpuPercent: parsedStat.cpuPercent,
+          memoryPercent: parsedStatus.memoryPercent,
+          rssBytes: parsedStatus.rssBytes,
+          name: parsedStat.name,
+          command: command || parsedStat.name,
+          gpuIndexes: [],
+          gpuMemoryBytes: 0
+        });
+      })
+  );
+
+  return processes.sort((a, b) => (b.cpuPercent ?? 0) - (a.cpuPercent ?? 0));
 }
 
 async function readGpus(processesByPid: Map<number, ProcessInfo>): Promise<{

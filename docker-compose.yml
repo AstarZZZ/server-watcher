@@ -1,0 +1,27 @@
+services:
+  server-watcher:
+    build: .
+    image: server-watcher:latest
+    container_name: server-watcher
+    restart: unless-stopped
+    network_mode: host
+    pid: host
+    gpus: all
+    environment:
+      WATCHER_HOST: 0.0.0.0
+      WATCHER_PORT: "33099"
+      WATCHER_SSH_HOST: 127.0.0.1
+      WATCHER_SSH_PORT: "22"
+      WATCHER_DATA_DIR: /app/data
+      WATCHER_STORAGE_ROOTS: /home
+      WATCHER_STORAGE_SCAN_HOUR: "2"
+      WATCHER_PROCESS_LIMIT: "250"
+      WATCHER_SYSTEMD_DIRS: /host/etc/systemd/system,/host/lib/systemd/system,/host/usr/lib/systemd/system
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      - ./data:/app/data
+      - /home:/home:ro
+      - /etc:/host/etc:ro
+      - /lib/systemd:/host/lib/systemd:ro
+      - /usr/lib/systemd:/host/usr/lib/systemd:ro

@@ -30,13 +30,14 @@ browser
        -> data/events.jsonl and data/storage.json
 ```
 
-生产运行时只有一个 Node.js 后端进程。前端构建为静态文件，由后端直接托管。
+生产运行时只有一个 Node.js 后端进程。前端构建为静态文件，由后端直接托管。推荐使用 Docker Compose 部署，把 Node 运行时、前端构建产物和后端依赖打包在同一个镜像里。
 
 ## 服务器要求
 
 - Linux 服务器。
-- Node.js 18+ 或 20+ 推荐；Node.js 16.20+ 也可以构建运行。
-- `npm`。
+- Docker Engine 和 Docker Compose v2 推荐。
+- NVIDIA 服务器用 Docker 部署时，需要安装 NVIDIA Container Toolkit。
+- 如果不用 Docker，Node.js 18+ 或 20+ 推荐，并需要 `npm`。
 - `sshd` 正常运行，并允许本机 `127.0.0.1` SSH 密码认证。
 - NVIDIA 服务器需要安装 `nvidia-smi`。
 - 如需 systemd 操作，登录用户需要在 sudoers 中拥有相应权限。
@@ -64,7 +65,7 @@ npm run dev:frontend
 
 Vite 开发端口是 `5173`，会代理 `/api` 和 `/ws` 到 `33099`。
 
-## 服务器部署
+## Docker 部署（推荐）
 
 建议部署到：
 
@@ -72,6 +73,52 @@ Vite 开发端口是 `5173`，会代理 `/api` 和 `/ws` 到 `33099`。
 cd ~/Projects
 git clone https://github.com/AstarZZZ/server-watcher.git gpu-watcher
 cd ~/Projects/gpu-watcher
+docker compose up -d --build
+```
+
+访问：
+
+```text
+http://服务器IP:33099
+```
+
+常用命令：
+
+```bash
+docker compose logs -f server-watcher
+docker compose restart server-watcher
+docker compose down
+```
+
+更新：
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+`docker-compose.yml` 默认使用：
+
+- `network_mode: host`：容器内 SSH 到 `127.0.0.1` 等于 SSH 到宿主机。
+- `pid: host`：进程表读取宿主机进程。
+- `gpus: all`：允许容器调用 NVIDIA 工具。
+- `/home:/home:ro`：只读扫描用户目录空间。
+- `/etc`、`/lib/systemd`、`/usr/lib/systemd` 只读挂载到 `/host/...`：自启动页面可读取宿主机 unit 文件。
+- `./data:/app/data`：审计日志和存储扫描结果持久化到项目目录。
+
+镜像运行时不安装额外 apt 包。容器内没有 `ps` 时，后端会直接读取宿主机 PID namespace 下的 `/proc`，并用 `/host/etc/passwd` 映射用户名。
+
+如果 Docker 不能看到显卡，先确认宿主机已经配置 NVIDIA Container Toolkit：
+
+```bash
+docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+```
+
+## Node/systemd 部署
+
+不用 Docker 时可以直接在服务器安装依赖：
+
+```bash
 bash scripts/bootstrap-server.sh
 ```
 
@@ -117,6 +164,7 @@ WATCHER_SSH_HOST=127.0.0.1
 WATCHER_SSH_PORT=22
 WATCHER_STORAGE_ROOTS=/home
 WATCHER_STORAGE_SCAN_HOUR=2
+WATCHER_SYSTEMD_DIRS=/etc/systemd/system,/lib/systemd/system,/usr/lib/systemd/system
 WATCHER_DATA_DIR=./data
 WATCHER_PROCESS_LIMIT=250
 ```

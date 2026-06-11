@@ -42,6 +42,10 @@ export const config = {
     listEnv("WATCHER_STORAGE_ROOTS").length > 0
       ? listEnv("WATCHER_STORAGE_ROOTS")
       : ["/home"],
+  systemdDirs:
+    listEnv("WATCHER_SYSTEMD_DIRS").length > 0
+      ? listEnv("WATCHER_SYSTEMD_DIRS")
+      : ["/etc/systemd/system", "/lib/systemd/system", "/usr/lib/systemd/system"],
   storageScanHour: numberEnv("WATCHER_STORAGE_SCAN_HOUR", 2),
   processLimit: numberEnv("WATCHER_PROCESS_LIMIT", 250),
   logMaxBytes: numberEnv("WATCHER_LOG_MAX_BYTES", 10 * 1024 * 1024),

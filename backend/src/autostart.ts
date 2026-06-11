@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { config } from "./config.js";
 import { tryCommand } from "./shell.js";
 import type { AutostartItem } from "./types.js";
 
@@ -15,7 +16,7 @@ async function systemdItems(): Promise<AutostartItem[]> {
     ],
     7000
   );
-  if (!units) return [];
+  if (!units?.stdout.trim()) return systemdFileItems();
 
   const active = await tryCommand(
     "systemctl",
@@ -32,7 +33,7 @@ async function systemdItems(): Promise<AutostartItem[]> {
     }
   }
 
-  return units.stdout
+  const items = units.stdout
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.endsWith(".service") || line.includes(".service "))
@@ -45,6 +46,116 @@ async function systemdItems(): Promise<AutostartItem[]> {
       state: `${parts[1] ?? "unknown"}${activeMap.has(parts[0]) ? ` / ${activeMap.get(parts[0])}` : ""}`,
       description: parts.slice(2).join(" ") || undefined
     }));
+  return items.length > 0 ? items : systemdFileItems();
+}
+
+interface SystemdFileCandidate {
+  file: string;
+  enabled: boolean;
+}
+
+async function systemdFileItems(): Promise<AutostartItem[]> {
+  const candidates: SystemdFileCandidate[] = [];
+  for (const dir of config.systemdDirs) {
+    candidates.push(...(await collectSystemdFiles(dir, 0)));
+  }
+
+  const byName = new Map<string, AutostartItem>();
+  for (const candidate of candidates) {
+    const name = path.basename(candidate.file);
+    if (!name.endsWith(".service")) continue;
+
+    const parsed = await parseSystemdUnit(candidate.file);
+    const existing = byName.get(name);
+    const enabled = candidate.enabled || existing?.state.startsWith("enabled");
+    byName.set(name, {
+      source: "systemd",
+      name,
+      state: enabled ? "enabled (unit file)" : "available (unit file)",
+      description: parsed.description ?? existing?.description,
+      command: parsed.command ?? existing?.command,
+      raw: candidate.file
+    });
+  }
+
+  return [...byName.values()]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .slice(0, 300);
+}
+
+async function collectSystemdFiles(
+  dir: string,
+  depth: number
+): Promise<SystemdFileCandidate[]> {
+  if (depth > 2) return [];
+  try {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    const items: SystemdFileCandidate[] = [];
+    const isEnablementDir =
+      dir.endsWith(".wants") || dir.endsWith(".requires");
+
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const shouldDescend =
+          depth === 0 ||
+          entry.name.endsWith(".wants") ||
+          entry.name.endsWith(".requires");
+        if (shouldDescend) {
+          items.push(...(await collectSystemdFiles(fullPath, depth + 1)));
+        }
+        continue;
+      }
+
+      if (entry.name.endsWith(".service")) {
+        items.push({ file: fullPath, enabled: isEnablementDir });
+      }
+    }
+    return items;
+  } catch {
+    return [];
+  }
+}
+
+async function parseSystemdUnit(
+  file: string
+): Promise<{ description?: string; command?: string }> {
+  try {
+    const stat = await fs.stat(file);
+    if (stat.size > 512 * 1024) return {};
+    const text = await fs.readFile(file, "utf8");
+    return {
+      description: readUnitValue(text, "Unit", "Description"),
+      command: readUnitValue(text, "Service", "ExecStart")
+    };
+  } catch {
+    return {};
+  }
+}
+
+function readUnitValue(
+  text: string,
+  sectionName: string,
+  keyName: string
+): string | undefined {
+  let currentSection = "";
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#") || line.startsWith(";")) continue;
+    const section = line.match(/^\[([^\]]+)\]$/);
+    if (section) {
+      currentSection = section[1] ?? "";
+      continue;
+    }
+    if (currentSection !== sectionName) continue;
+    const separator = line.indexOf("=");
+    if (separator === -1) continue;
+    const key = line.slice(0, separator).trim();
+    if (key !== keyName) continue;
+    const value = line.slice(separator + 1).trim();
+    return value || undefined;
+  }
+  return undefined;
 }
 
 async function cronItems(): Promise<AutostartItem[]> {
