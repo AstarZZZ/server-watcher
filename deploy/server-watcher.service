@@ -5,23 +5,23 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/zhaojunzhe/Projects/gpu-watcher
+WorkingDirectory=/opt/server-watcher
 Environment=NODE_ENV=production
 Environment=WATCHER_HOST=0.0.0.0
 Environment=WATCHER_PORT=33099
 Environment=WATCHER_SSH_HOST=127.0.0.1
 Environment=WATCHER_SSH_PORT=22
 Environment=WATCHER_STORAGE_ROOTS=/home
-Environment=WATCHER_DATA_DIR=/home/zhaojunzhe/Projects/gpu-watcher/data
+Environment=WATCHER_DATA_DIR=/opt/server-watcher/data
 ExecStart=/usr/bin/node backend/dist/server.js
 Restart=on-failure
 RestartSec=3
-User=zhaojunzhe
-Group=zhaojunzhe
+User=server-watcher
+Group=server-watcher
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
-ReadWritePaths=/home/zhaojunzhe/Projects/gpu-watcher/data
+ReadWritePaths=/opt/server-watcher/data
 
 [Install]
 WantedBy=multi-user.target

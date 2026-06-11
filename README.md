@@ -72,7 +72,7 @@ Vite 开发端口是 `5173`，会代理 `/api` 和 `/ws` 到 `33099`。
 
 ```bash
 cd ~/Projects
-git clone https://github.com/AstarZZZ/server-watcher.git gpu-watcher
+git clone https://github.com/YOUR_ORG_OR_USER/server-watcher.git gpu-watcher
 cd ~/Projects/gpu-watcher
 docker compose up -d --build
 ```
@@ -142,7 +142,7 @@ systemctl status server-watcher --no-pager
 journalctl -u server-watcher -f
 ```
 
-如果服务器用户名不是 `zhaojunzhe`，先修改 [deploy/server-watcher.service](deploy/server-watcher.service) 中的：
+systemd 模板默认使用独立服务账号 `server-watcher`，项目目录为 `/opt/server-watcher`。如果你的部署账号或目录不同，先修改 [deploy/server-watcher.service](deploy/server-watcher.service) 中的：
 
 ```ini
 WorkingDirectory=
