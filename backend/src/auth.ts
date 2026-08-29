@@ -2,12 +2,18 @@ import crypto from "node:crypto";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { Client } from "ssh2";
 import { config } from "./config.js";
-import { tryCommand } from "./shell.js";
+
+export interface SshTarget {
+  host: string;
+  port: number;
+}
 
 export interface Session {
   token: string;
   username: string;
   groups: string[];
+  host: string;
+  port: number;
   createdAt: number;
   lastSeenAt: number;
   expiresAt: number;
@@ -44,13 +50,19 @@ export function getSession(req: IncomingMessage): Session | null {
   return session;
 }
 
-export function createSession(username: string, groups: string[]): Session {
+export function createSession(
+  username: string,
+  groups: string[],
+  target: SshTarget
+): Session {
   const token = crypto.randomBytes(32).toString("base64url");
   const now = Date.now();
   const session: Session = {
     token,
     username,
     groups,
+    host: target.host,
+    port: target.port,
     createdAt: now,
     lastSeenAt: now,
     expiresAt: now + config.sessionHours * 60 * 60 * 1000
@@ -81,15 +93,23 @@ export function clearSessionCookie(res: ServerResponse): void {
   );
 }
 
-export async function getUserGroups(username: string): Promise<string[]> {
-  if (!isSafeUsername(username)) return [];
-  const result = await tryCommand("id", ["-nG", username], 3000);
-  if (!result) return [];
-  return result.stdout
-    .trim()
-    .split(/\s+/)
-    .map((group) => group.trim())
-    .filter(Boolean);
+export function normalizeSshTarget(hostValue: unknown, portValue: unknown): SshTarget {
+  const rawHost = String(hostValue ?? config.sshHost).trim();
+  const host = rawHost.startsWith("[") && rawHost.endsWith("]")
+    ? rawHost.slice(1, -1)
+    : rawHost;
+  if (
+    !host ||
+    host.length > 253 ||
+    !/^[a-zA-Z0-9._:%-]+$/.test(host)
+  ) {
+    throw new Error("SSH 主机地址不合法");
+  }
+  const port = Number(portValue ?? config.sshPort);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("SSH 端口必须是 1 到 65535 之间的整数");
+  }
+  return { host, port };
 }
 
 export function assertAllowedGroups(groups: string[]): void {
@@ -105,6 +125,7 @@ export function assertAllowedGroups(groups: string[]): void {
 export function connectSsh(
   username: string,
   password: string,
+  target: SshTarget = { host: config.sshHost, port: config.sshPort },
   timeoutMs = 10000
 ): Promise<Client> {
   if (!isSafeUsername(username)) {
@@ -127,8 +148,8 @@ export function connectSsh(
         reject(new Error(error.message || "SSH 登录失败"));
       })
       .connect({
-        host: config.sshHost,
-        port: config.sshPort,
+        host: target.host,
+        port: target.port,
         username,
         password,
         readyTimeout: timeoutMs,
@@ -137,43 +158,60 @@ export function connectSsh(
   });
 }
 
-export async function authenticateSsh(
-  username: string,
-  password: string
-): Promise<{ username: string; groups: string[] }> {
-  if (!password) throw new Error("请输入密码");
-  const client = await connectSsh(username, password);
-  client.end();
-  const groups = await getUserGroups(username);
-  assertAllowedGroups(groups);
-  return { username, groups };
+interface ExecOptions {
+  timeoutMs?: number;
+  maxOutputBytes?: number;
 }
 
-export async function execSsh(
-  username: string,
-  password: string,
+function execOnClient(
+  client: Client,
   command: string,
-  stdin?: string
+  stdin?: string,
+  options: ExecOptions = {}
 ): Promise<{ stdout: string; stderr: string; code: number | null }> {
-  const client = await connectSsh(username, password);
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  const maxOutputBytes = options.maxOutputBytes ?? 16 * 1024 * 1024;
   return new Promise((resolve, reject) => {
     let stdout = "";
     let stderr = "";
+    let outputBytes = 0;
+    let settled = false;
+    const finish = (
+      callback: () => void
+    ) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback();
+    };
+    const timer = setTimeout(() => {
+      client.destroy();
+      finish(() => reject(new Error("SSH 命令执行超时")));
+    }, timeoutMs);
+
     client.exec(command, { pty: Boolean(stdin) }, (error, stream) => {
       if (error) {
-        client.end();
-        reject(error);
+        finish(() => reject(error));
         return;
       }
-      stream.on("data", (chunk: Buffer) => {
-        stdout += chunk.toString("utf8");
-      });
-      stream.stderr.on("data", (chunk: Buffer) => {
-        stderr += chunk.toString("utf8");
-      });
+      const append = (target: "stdout" | "stderr", chunk: Buffer) => {
+        outputBytes += chunk.length;
+        if (outputBytes > maxOutputBytes) {
+          stream.destroy();
+          client.destroy();
+          finish(() => reject(new Error("SSH 命令输出过大，已停止读取")));
+          return;
+        }
+        if (target === "stdout") stdout += chunk.toString("utf8");
+        else stderr += chunk.toString("utf8");
+      };
+      stream.on("data", (chunk: Buffer) => append("stdout", chunk));
+      stream.stderr.on("data", (chunk: Buffer) => append("stderr", chunk));
       stream.on("close", (code: number | null) => {
-        client.end();
-        resolve({ stdout, stderr, code });
+        finish(() => resolve({ stdout, stderr, code }));
+      });
+      stream.on("error", (streamError: Error) => {
+        finish(() => reject(streamError));
       });
       if (stdin) {
         stream.write(stdin);
@@ -181,4 +219,45 @@ export async function execSsh(
       }
     });
   });
+}
+
+export async function authenticateSsh(
+  username: string,
+  password: string,
+  target: SshTarget = { host: config.sshHost, port: config.sshPort }
+): Promise<{ username: string; groups: string[]; target: SshTarget }> {
+  if (!password) throw new Error("请输入密码");
+  const client = await connectSsh(username, password, target);
+  let groups: string[] = [];
+  try {
+    const result = await execOnClient(client, "id -nG", undefined, {
+      timeoutMs: 5000,
+      maxOutputBytes: 64 * 1024
+    });
+    groups = result.stdout
+      .trim()
+      .split(/\s+/)
+      .map((group) => group.trim())
+      .filter(Boolean);
+  } finally {
+    client.end();
+  }
+  assertAllowedGroups(groups);
+  return { username, groups, target };
+}
+
+export async function execSsh(
+  username: string,
+  password: string,
+  command: string,
+  stdin?: string,
+  target: SshTarget = { host: config.sshHost, port: config.sshPort },
+  options: ExecOptions = {}
+): Promise<{ stdout: string; stderr: string; code: number | null }> {
+  const client = await connectSsh(username, password, target);
+  try {
+    return await execOnClient(client, command, stdin, options);
+  } finally {
+    client.end();
+  }
 }

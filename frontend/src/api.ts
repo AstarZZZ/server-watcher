@@ -1,6 +1,7 @@
 import type {
   AutostartItem,
   Me,
+  RemoteFileListing,
   SystemSnapshot,
   WatcherEvent
 } from "./types";
@@ -24,10 +25,15 @@ async function request<T>(
   return body as T;
 }
 
-export function login(username: string, password: string): Promise<Me> {
+export function login(
+  host: string,
+  port: number,
+  username: string,
+  password: string
+): Promise<Me> {
   return request<Me>("/api/login", {
     method: "POST",
-    body: JSON.stringify({ username, password })
+    body: JSON.stringify({ host, port, username, password })
   });
 }
 
@@ -84,5 +90,27 @@ export function systemdAction(
   return request("/api/autostart/systemd/action", {
     method: "POST",
     body: JSON.stringify({ service, action, password })
+  });
+}
+
+export function listRemoteFiles(
+  password: string,
+  path?: string,
+  refresh = false
+): Promise<RemoteFileListing> {
+  return request("/api/files/list", {
+    method: "POST",
+    body: JSON.stringify({ password, path, refresh })
+  });
+}
+
+export function deleteRemoteFiles(
+  password: string,
+  paths: string[],
+  confirmation: string
+): Promise<{ deleted: number; stdout: string }> {
+  return request("/api/files/delete", {
+    method: "POST",
+    body: JSON.stringify({ password, paths, confirmation })
   });
 }

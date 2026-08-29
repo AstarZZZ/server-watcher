@@ -5,6 +5,7 @@ import {
   Cpu,
   Database,
   Filter,
+  FolderOpen,
   Gauge,
   HardDrive,
   LayoutDashboard,
@@ -38,6 +39,7 @@ import {
   systemdAction
 } from "./api";
 import { bytes, compactDate, duration, percent } from "./format";
+import RemoteFileManager from "./RemoteFileManager";
 import TerminalPane from "./TerminalPane";
 import type {
   AutostartItem,
@@ -55,6 +57,7 @@ type Page =
   | "processes"
   | "users"
   | "storage"
+  | "files"
   | "logs"
   | "terminal"
   | "autostart";
@@ -82,6 +85,7 @@ const navItems: Array<{
   { id: "processes", label: "进程", icon: Activity },
   { id: "users", label: "用户", icon: Users },
   { id: "storage", label: "存储", icon: HardDrive },
+  { id: "files", label: "远程文件", icon: FolderOpen },
   { id: "logs", label: "日志", icon: ListChecks },
   { id: "terminal", label: "终端", icon: TerminalSquare },
   { id: "autostart", label: "自启动", icon: Power }
@@ -337,9 +341,17 @@ function StoragePieChart({
 function LoginScreen({
   onLogin
 }: {
-  onLogin: (user: Me) => void;
+  onLogin: (user: Me, password: string) => void;
 }) {
-  const [username, setUsername] = useState("");
+  const [host, setHost] = useState(
+    () => window.localStorage.getItem("server-watcher.sshHost") ?? "127.0.0.1"
+  );
+  const [port, setPort] = useState(
+    () => window.localStorage.getItem("server-watcher.sshPort") ?? "22"
+  );
+  const [username, setUsername] = useState(
+    () => window.localStorage.getItem("server-watcher.sshUsername") ?? ""
+  );
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -349,8 +361,11 @@ function LoginScreen({
     setLoading(true);
     setError("");
     try {
-      onLogin(await login(username, password));
-      setPassword("");
+      const user = await login(host, Number(port), username, password);
+      window.localStorage.setItem("server-watcher.sshHost", user.host);
+      window.localStorage.setItem("server-watcher.sshPort", String(user.port));
+      window.localStorage.setItem("server-watcher.sshUsername", user.username);
+      onLogin(user, password);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -365,7 +380,26 @@ function LoginScreen({
           <Server size={26} />
         </div>
         <h1>Server Watcher</h1>
-        <p>使用服务器 SSH 账号登录。权限由 Linux 用户、用户组和 sudoers 决定。</p>
+        <p>连接你的 SSH 服务器。文件权限由远程 Linux 账户决定，密码不会被保存。</p>
+        <div className="login-target-row">
+          <label>
+            SSH 主机
+            <input
+              value={host}
+              onChange={(event) => setHost(event.target.value)}
+              placeholder="服务器 IP 或域名"
+            />
+          </label>
+          <label>
+            端口
+            <input
+              inputMode="numeric"
+              value={port}
+              onChange={(event) => setPort(event.target.value)}
+              placeholder="22"
+            />
+          </label>
+        </div>
         <label>
           用户名
           <input
@@ -388,7 +422,7 @@ function LoginScreen({
         {error && <div className="form-error">{error}</div>}
         <button className="primary-button" disabled={loading || !username || !password}>
           <ShieldAlert size={16} />
-          {loading ? "验证中" : "登录看板"}
+          {loading ? "正在连接" : "登录 SSH 服务器"}
         </button>
       </form>
     </main>
@@ -697,6 +731,7 @@ export default function App() {
   const [autostart, setAutostart] = useState<AutostartItem[]>([]);
   const [toast, setToast] = useState("");
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
+  const [sshPassword, setSshPassword] = useState("");
   const [refreshIntervalMs, setRefreshIntervalMs] = useState(getStoredRefreshInterval);
   const [theme, setTheme] = useState<ThemeMode>(getStoredTheme);
   const [filters, setFilters] = useState({
@@ -784,7 +819,15 @@ export default function App() {
   }
 
   if (!user) {
-    return <LoginScreen onLogin={setUser} />;
+    return (
+      <LoginScreen
+        onLogin={(nextUser, password) => {
+          setUser(nextUser);
+          setSshPassword(password);
+          setPage("files");
+        }}
+      />
+    );
   }
 
   const currentUser = user;
@@ -847,6 +890,7 @@ export default function App() {
     await logout().catch(() => undefined);
     setUser(null);
     setSnapshot(null);
+    setSshPassword("");
   }
 
   return (
@@ -889,33 +933,39 @@ export default function App() {
           <div>
             <h1>{navItems.find((item) => item.id === page)?.label}</h1>
             <span>
-              {snapshot
+              {page === "files"
+                ? `${user.username}@${user.host}:${user.port} · 仅限账户主目录`
+                : snapshot
                 ? `更新 ${compactDate(snapshot.timestamp)} · ${snapshot.collectionReason} · 运行 ${duration(snapshot.uptimeSeconds)}`
                 : "等待采集"}
             </span>
           </div>
           <div className="topbar-actions">
-            <label className="interval-control" title="实时刷新间隔">
-              <Clock3 size={15} />
-              <span>刷新</span>
-              <select
-                aria-label="实时刷新间隔"
-                value={refreshIntervalMs}
-                onChange={(event) =>
-                  setRefreshIntervalMs(normalizeRefreshInterval(Number(event.target.value)))
-                }
-              >
-                {refreshIntervalOptions.map((interval) => (
-                  <option value={interval} key={interval}>
-                    {interval / 1000} 秒
-                  </option>
-                ))}
-              </select>
-            </label>
-            <span className={snapshot?.activeClients ? "status-chip live" : "status-chip"}>
-              <Signal size={14} />
-              {snapshot?.activeClients ?? 0} 在线
-            </span>
+            {page !== "files" && (
+              <>
+                <label className="interval-control" title="实时刷新间隔">
+                  <Clock3 size={15} />
+                  <span>刷新</span>
+                  <select
+                    aria-label="实时刷新间隔"
+                    value={refreshIntervalMs}
+                    onChange={(event) =>
+                      setRefreshIntervalMs(normalizeRefreshInterval(Number(event.target.value)))
+                    }
+                  >
+                    {refreshIntervalOptions.map((interval) => (
+                      <option value={interval} key={interval}>
+                        {interval / 1000} 秒
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <span className={snapshot?.activeClients ? "status-chip live" : "status-chip"}>
+                  <Signal size={14} />
+                  {snapshot?.activeClients ?? 0} 在线
+                </span>
+              </>
+            )}
             <button
               className="icon-button"
               onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
@@ -923,13 +973,15 @@ export default function App() {
             >
               {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
             </button>
-            <button
-              className="secondary-button"
-              onClick={() => refreshSnapshot().then(setSnapshot).catch((error) => setToast(error.message))}
-            >
-              <RefreshCw size={16} />
-              刷新
-            </button>
+            {page !== "files" && (
+              <button
+                className="secondary-button"
+                onClick={() => refreshSnapshot().then(setSnapshot).catch((error) => setToast(error.message))}
+              >
+                <RefreshCw size={16} />
+                刷新
+              </button>
+            )}
           </div>
         </header>
 
@@ -939,7 +991,7 @@ export default function App() {
           </div>
         )}
 
-        {snapshot?.warnings.map((warning) => (
+        {page !== "files" && snapshot?.warnings.map((warning) => (
           <div className="warning" key={warning}>
             <ShieldAlert size={16} />
             {warning}
@@ -1083,6 +1135,15 @@ export default function App() {
               </table>
             </div>
           </section>
+        )}
+
+        {page === "files" && (
+          <RemoteFileManager
+            user={user}
+            password={sshPassword}
+            onPasswordChange={setSshPassword}
+            onToast={setToast}
+          />
         )}
 
         {page === "logs" && (

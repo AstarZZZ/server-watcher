@@ -115,5 +115,29 @@ export interface SystemSnapshot {
 export interface Me {
   username: string;
   groups: string[];
+  host: string;
+  port: number;
   expiresAt: string;
+}
+
+export type RemoteFileKind = "directory" | "file" | "symlink" | "other";
+
+export interface RemoteFileEntry {
+  name: string;
+  path: string;
+  kind: RemoteFileKind;
+  sizeBytes: number;
+  modifiedAt: string;
+  hidden: boolean;
+}
+
+export interface RemoteFileListing {
+  home: string;
+  path: string;
+  parent: string | null;
+  entries: RemoteFileEntry[];
+  totalBytes: number;
+  truncated: boolean;
+  cached: boolean;
+  scannedAt: string;
 }

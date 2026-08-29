@@ -16,11 +16,17 @@ import {
   destroySession,
   execSsh,
   getSession,
+  normalizeSshTarget,
   parseCookies,
   writeSessionCookie
 } from "./auth.js";
 import { Collector } from "./collector.js";
 import { config } from "./config.js";
+import {
+  clearRemoteFileCache,
+  deleteRemoteFiles,
+  listRemoteFiles
+} from "./files.js";
 import { readEvents, recordEvent } from "./logger.js";
 import type { SystemSnapshot } from "./types.js";
 
@@ -168,16 +174,21 @@ async function handleApi(req: IncomingMessage, res: ServerResponse): Promise<voi
     const body = await readJson(req);
     const username = String(body.username ?? "").trim();
     const password = String(body.password ?? "");
-    const auth = await authenticateSsh(username, password);
-    const session = createSession(auth.username, auth.groups);
+    const target = normalizeSshTarget(body.host, body.port);
+    const auth = await authenticateSsh(username, password, target);
+    const session = createSession(auth.username, auth.groups, auth.target);
     writeSessionCookie(res, session);
     await recordEvent("auth.login", "用户登录成功", username, {
       groups: auth.groups,
-      remoteAddress: req.socket.remoteAddress
+      remoteAddress: req.socket.remoteAddress,
+      sshHost: auth.target.host,
+      sshPort: auth.target.port
     });
     sendJson(res, 200, {
       username: auth.username,
       groups: auth.groups,
+      host: auth.target.host,
+      port: auth.target.port,
       expiresAt: new Date(session.expiresAt).toISOString()
     });
     return;
@@ -186,7 +197,10 @@ async function handleApi(req: IncomingMessage, res: ServerResponse): Promise<voi
   if (method === "POST" && url.pathname === "/api/logout") {
     const token = parseCookies(req).watcher_session;
     const session = getSession(req);
-    if (token) destroySession(token);
+    if (token) {
+      destroySession(token);
+      clearRemoteFileCache(token);
+    }
     clearSessionCookie(res);
     await recordEvent("auth.logout", "用户退出登录", session?.username);
     sendJson(res, 200, { ok: true });
@@ -200,6 +214,8 @@ async function handleApi(req: IncomingMessage, res: ServerResponse): Promise<voi
     sendJson(res, 200, {
       username: session.username,
       groups: session.groups,
+      host: session.host,
+      port: session.port,
       expiresAt: new Date(session.expiresAt).toISOString()
     });
     return;
@@ -221,7 +237,10 @@ async function handleApi(req: IncomingMessage, res: ServerResponse): Promise<voi
     const body = await readJson(req);
     const password = String(body.password ?? "");
     if (!password) throw new Error("请重新输入 SSH 密码后再扫描存储");
-    const auth = await authenticateSsh(session.username, password);
+    const auth = await authenticateSsh(session.username, password, {
+      host: session.host,
+      port: session.port
+    });
     const storage = await collector.forceStorageScan();
     await recordEvent("storage.manual_scan", "手动触发存储扫描", auth.username);
     sendJson(res, 200, { storage });
@@ -239,6 +258,44 @@ async function handleApi(req: IncomingMessage, res: ServerResponse): Promise<voi
     return;
   }
 
+  if (method === "POST" && url.pathname === "/api/files/list") {
+    const body = await readJson(req);
+    const password = String(body.password ?? "");
+    const requestedPath = String(body.path ?? "").trim() || undefined;
+    const forceRefresh = body.refresh === true;
+    const listing = await listRemoteFiles(
+      session,
+      password,
+      requestedPath,
+      forceRefresh
+    );
+    sendJson(res, 200, listing);
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/api/files/delete") {
+    const body = await readJson(req);
+    const password = String(body.password ?? "");
+    const confirmation = String(body.confirmation ?? "");
+    const paths = Array.isArray(body.paths)
+      ? body.paths.map((item) => String(item))
+      : [];
+    const result = await deleteRemoteFiles(
+      session,
+      password,
+      paths,
+      confirmation
+    );
+    await recordEvent(
+      "files.delete",
+      `永久删除 ${result.deleted} 个文件或文件夹`,
+      session.username,
+      { count: result.deleted }
+    );
+    sendJson(res, 200, result);
+    return;
+  }
+
   if (method === "POST" && url.pathname === "/api/autostart/systemd/action") {
     const body = await readJson(req);
     const service = String(body.service ?? "");
@@ -252,7 +309,8 @@ async function handleApi(req: IncomingMessage, res: ServerResponse): Promise<voi
       session.username,
       password,
       command,
-      `${password}\n`
+      `${password}\n`,
+      { host: session.host, port: session.port }
     );
     await recordEvent(
       "systemd.action",
@@ -281,7 +339,8 @@ async function handleApi(req: IncomingMessage, res: ServerResponse): Promise<voi
       session.username,
       password,
       command,
-      useSudo ? `${password}\n` : undefined
+      useSudo ? `${password}\n` : undefined,
+      { host: session.host, port: session.port }
     );
     await recordEvent("process.signal", `kill -${signal} ${pid}`, session.username, {
       pid,
@@ -410,7 +469,11 @@ terminalWss.on("connection", (ws, req) => {
       if (message.type === "auth") {
         if (sshClient) return;
         try {
-          sshClient = await connectSsh(session.username, String(message.password ?? ""));
+          sshClient = await connectSsh(
+            session.username,
+            String(message.password ?? ""),
+            { host: session.host, port: session.port }
+          );
         } catch (error) {
           sendWs(ws, {
             type: "error",
